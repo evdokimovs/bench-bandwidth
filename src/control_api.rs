@@ -42,12 +42,8 @@ impl ControlClient {
     /// Note that this function don't connects to the server. This mean that
     /// when you call [`ControlClient::new`] and server not working you will
     /// don't know it until try to send something with this client.
-    pub async fn connect(dst: String) -> Self
-    {
-        Self(
-            ControlApiClient::connect(dst)
-                .await.unwrap()
-        )
+    pub async fn connect(dst: String) -> Self {
+        Self(ControlApiClient::connect(dst).await.unwrap())
     }
 
     /// Gets some [`proto::Element`] by local URI.

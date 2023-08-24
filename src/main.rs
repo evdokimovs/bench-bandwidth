@@ -10,9 +10,13 @@ use std::{
     time::Duration,
 };
 
-use crate::control_api::RoomBuilder;
 use crate::control_api::MemberBuilder;
+use crate::control_api::RoomBuilder;
 
+use crate::control_api::{
+    ControlClient, WebRtcPlayEndpointBuilder, WebRtcPublishEndpoint, WebRtcPublishEndpointBuilder,
+};
+use crate::sfu_member::SfuMember;
 use actix_http::ws;
 use awc::ws::Frame;
 use bytes::Bytes;
@@ -46,8 +50,6 @@ use webrtc::{
     track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal},
     util::{Marshal, MarshalSize},
 };
-use crate::control_api::{ControlClient, WebRtcPlayEndpointBuilder, WebRtcPublishEndpoint, WebRtcPublishEndpointBuilder};
-use crate::sfu_member::SfuMember;
 
 #[actix_rt::main]
 async fn main() {
@@ -60,16 +62,13 @@ async fn main() {
     // SfuMember::read_packet(Arc::clone(&sfu_member));
     // tokio::time::sleep(std::time::Duration::from_secs(2600)).await;
 
-
-
-
     // let sfu_member = SfuMember::connect("ws://127.0.0.1:8080/ws/".to_string(), RoomId("new-room".to_string()), MemberId("test".to_string())).await;
     // actix::spawn(async move {
     //     SfuMember::send_packet(sfu_member, 10_000);
     //     SfuMember::read_packet(sfu_member);
-        // loop {
-        //     sfu_member.lock().unwrap().send_packet().await;
-        // }
+    // loop {
+    //     sfu_member.lock().unwrap().send_packet().await;
+    // }
     // });
     // tokio::time::sleep(std::time::Duration::from_secs(100)).await;
 
@@ -81,50 +80,58 @@ async fn main() {
     let matches = clap::Command::new("medea-client")
         .subcommand_required(true)
         .subcommand(
-            clap::Command::new("create").arg(Arg::new("room_id").required(true)).arg(Arg::new("member_id"))
+            clap::Command::new("create")
+                .arg(Arg::new("room_id").required(true))
+                .arg(Arg::new("member_id")),
         )
         .subcommand(
             clap::Command::new("connect")
                 .subcommand_required(true)
-                .subcommand(
-                    clap::Command::new("receiver").arg(clap::Arg::new("addr")),
-                )
-                .subcommand(
-                    clap::Command::new("sender").arg(clap::Arg::new("addr")),
-                ),
+                .subcommand(clap::Command::new("receiver").arg(clap::Arg::new("addr")))
+                .subcommand(clap::Command::new("sender").arg(clap::Arg::new("addr"))),
         )
         .get_matches();
 
-    let mut manager = ControlManager::new("http://127.0.0.1:6565".to_string()).await;
     match matches.subcommand() {
         Some(("create", create_matches)) => {
-                let room_id = create_matches.get_one::<String>("room_id").unwrap();
-                if let Some(member_id) = create_matches.get_one::<String>("member_id") {
-                    println!("Creating new Member {room_id}/{member_id}");
-                    manager.create_member(room_id.clone(), member_id.clone()).await;
-                } else {
-                    println!("Creating new Room {room_id}");
-                    manager.create_room(room_id.clone()).await;
-                }
-        },
+            let mut manager = ControlManager::new("http://127.0.0.1:6565".to_string()).await;
+            let room_id = create_matches.get_one::<String>("room_id").unwrap();
+            if let Some(member_id) = create_matches.get_one::<String>("member_id") {
+                println!("Creating new Member {room_id}/{member_id}");
+                manager
+                    .create_member(room_id.clone(), member_id.clone())
+                    .await;
+            } else {
+                println!("Creating new Room {room_id}");
+                manager.create_room(room_id.clone()).await;
+            }
+        }
         Some(("connect", connect_matches)) => {
             match connect_matches.subcommand() {
                 Some(("sender", _)) => {
-                    let sfu_member = SfuMember::connect("ws://127.0.0.1:8080/ws/".to_string(), RoomId("pub-sub-sfu-call".to_string()), MemberId("publisher".to_string())).await;
-                    SfuMember::send_packet_task(Arc::clone(&sfu_member), 50000).await;
-                    // tokio::time::sleep(std::time::Duration::from_secs(2600)).await;
+                    let sfu_member = SfuMember::connect(
+                        "ws://127.0.0.1:8080/ws/".to_string(),
+                        RoomId("pub-sub-sfu-call".to_string()),
+                        MemberId("publisher".to_string()),
+                    )
+                    .await;
+                    SfuMember::send_packet_task(sfu_member, 500000).await;
                 }
                 Some(("receiver", _)) => {
-                    let sfu_member = SfuMember::connect("ws://127.0.0.1:8080/ws/".to_string(), RoomId("pub-sub-sfu-call".to_string()), MemberId("subscriber-2".to_string())).await;
+                    let sfu_member = SfuMember::connect(
+                        "ws://127.0.0.1:8080/ws/".to_string(),
+                        RoomId("pub-sub-sfu-call".to_string()),
+                        MemberId("subscriber-2".to_string()),
+                    )
+                    .await;
                     SfuMember::read_packet_task(Arc::clone(&sfu_member)).await;
                     // tokio::time::sleep(std::time::Duration::from_secs(2600)).await;
                 }
-                _ => ()
+                _ => (),
             }
         }
-        _ => ()
+        _ => (),
     }
-
 }
 
 struct ControlManager(ControlClient);
@@ -158,7 +165,7 @@ impl ControlManager {
                         if let Some(api::member::element::El::WebrtcPub(publish)) = endpoint.el {
                             all_publishers_fids.push((
                                 format!("play-{}", member.id),
-                                format!("local://{}/{}/{}", room.id, member.id, publish.id)
+                                format!("local://{}/{}/{}", room.id, member.id, publish.id),
                             ));
                             endpoints_to_create.push((
                                 format!("{}/{}", room.id, member.id),
@@ -173,33 +180,50 @@ impl ControlManager {
 
         let mut member = MemberBuilder::default();
         member.id(member_id.clone());
-        member.credentials(medea_control_api_proto::grpc::api::member::Credentials::Plain("test".to_string()));
+        member.credentials(
+            medea_control_api_proto::grpc::api::member::Credentials::Plain("test".to_string()),
+        );
         for (play_name, publisher_fid) in all_publishers_fids {
-            member.add_endpoint(WebRtcPlayEndpointBuilder::default().id(play_name).src(publisher_fid).build().unwrap());
+            member.add_endpoint(
+                WebRtcPlayEndpointBuilder::default()
+                    .id(play_name)
+                    .src(publisher_fid)
+                    .build()
+                    .unwrap(),
+            );
         }
-        member.add_endpoint(WebRtcPublishEndpointBuilder::default().id("publish").p2p_mode(P2pMode::Never).build().unwrap());
+        member.add_endpoint(
+            WebRtcPublishEndpointBuilder::default()
+                .id("publish")
+                .p2p_mode(P2pMode::Never)
+                .build()
+                .unwrap(),
+        );
 
-        let mut credentials = self.0.create(
-            member.build().unwrap().build_request(room_id)
-        ).await;
+        let mut credentials = self
+            .0
+            .create(member.build().unwrap().build_request(room_id))
+            .await;
 
         for (url, id, src) in endpoints_to_create {
-            self.0.create(
-                WebRtcPlayEndpointBuilder::default().id(id).src(src).build().unwrap().build_request(url)
-            ).await;
+            self.0
+                .create(
+                    WebRtcPlayEndpointBuilder::default()
+                        .id(id)
+                        .src(src)
+                        .build()
+                        .unwrap()
+                        .build_request(url),
+                )
+                .await;
         }
-
 
         credentials.remove(&member_id).unwrap()
     }
 }
 
 mod control {
-    pub async fn create_member(room_id: String, member_id: String) {
+    pub async fn create_member(room_id: String, member_id: String) {}
 
-    }
-
-    pub async fn create_room(room_id: String) {
-
-    }
+    pub async fn create_room(room_id: String) {}
 }

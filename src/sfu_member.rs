@@ -1,13 +1,15 @@
+use awc::{ws, BoxedSocket};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use awc::{BoxedSocket, ws};
-use webrtc::api::{API, APIBuilder};
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
+use webrtc::api::{APIBuilder, API};
 use webrtc::ice::network_type::NetworkType;
-use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType};
+use webrtc::rtp_transceiver::rtp_codec::{
+    RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType,
+};
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
 
@@ -65,22 +67,25 @@ fn build_webrtc_api() -> API {
         .build()
 }
 
-use tokio::sync::oneshot;
-use tokio::sync::mpsc;
 use actix_codec::Framed;
 use awc::ws::Codec;
 use awc::ws::Frame;
-use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
-use medea_client_api_proto::{ClientMsg, Command, Credential, Event, IceCandidate, MemberId, NegotiationRole, PeerId, RoomId, ServerMsg};
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::policy::bundle_policy::RTCBundlePolicy;
 use awc::ws::Message;
 use bytes::Bytes;
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
+use medea_client_api_proto::{
+    ClientMsg, Command, Credential, Event, IceCandidate, MemberId, NegotiationRole, PeerId, RoomId,
+    ServerMsg,
+};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::media::Sample;
-use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::policy::bundle_policy::RTCBundlePolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp::extension::HeaderExtension;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
@@ -110,33 +115,47 @@ pub struct SfuMember {
     receivers: Vec<Arc<RTCRtpReceiver>>,
 }
 
+use str0m::{Answer, Offer};
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+
 impl SfuMember {
     pub async fn connect(url: String, room_id: RoomId, member_id: MemberId) -> Arc<Mutex<Self>> {
         let client: awc::Client = awc::Client::new();
         let api = build_webrtc_api();
         let (negotiation_completed_tx, negotiation_completed_rx) = oneshot::channel();
-        // baseUrl + roomId + '/' + username + '?token=test'
-        let url = format!("ws://127.0.0.1:8080/ws");
-        let (_, framed) = client.ws(url.as_str()).connect().await.unwrap();
-        let (mut ws_sender, ws_receiver) = framed.split();
+
+        // let mut req_client = reqwest::Client::new();
+        // let resp: Answer = req_client
+        //     .post("127.0.0.1:3000")
+        //     .header(reqwest::header::CONTENT_TYPE, "application/json")
+        //     .send()
+        //     .await
+        //     .unwrap()
+        //     .json()
+        //     .await
+        //     .unwrap();
+        //
+        // // baseUrl + roomId + '/' + username + '?token=test'
+        // let url = format!("ws://127.0.0.1:8080/ws");
+        // let (_, framed) = client.ws(url.as_str()).connect().await.unwrap();
+        // let (mut ws_sender, ws_receiver) = framed.split();
         let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Message>();
-
-        actix::spawn(async move {
-            while let Some(msg) = ws_rx.recv().await {
-                ws_sender.send(msg).await;
-            }
-        });
-        let msg = ClientMsg::Command {
-            room_id: room_id.clone(),
-            command: Command::JoinRoom {
-                member_id,
-                credential: Credential("test".to_string()),
-            },
-        };
-
-        let msg =
-            ws::Message::Text(serde_json::to_string(&msg).unwrap().into());
-        ws_tx.send(msg).unwrap();
+        //
+        // actix::spawn(async move {
+        //     while let Some(msg) = ws_rx.recv().await {
+        //         ws_sender.send(msg).await;
+        //     }
+        // });
+        // let msg = ClientMsg::Command {
+        //     room_id: room_id.clone(),
+        //     command: Command::JoinRoom {
+        //         member_id,
+        //         credential: Credential("test".to_string()),
+        //     },
+        // };
+        //
+        // let msg = ws::Message::Text(serde_json::to_string(&msg).unwrap().into());
+        // ws_tx.send(msg).unwrap();
 
         let this = Arc::new(Mutex::new(Self {
             api,
@@ -148,20 +167,178 @@ impl SfuMember {
             pcs: HashMap::new(),
             receivers: Vec::new(),
         }));
-        actix::spawn(Self::ws_handler(Arc::clone(&this), ws_receiver));
+        Self::negotiate(Arc::clone(&this)).await;
+        // actix::spawn(Self::ws_handler(Arc::clone(&this), ws_receiver));
 
         negotiation_completed_rx.await;
 
         this
     }
 
-    async fn handle_peer_created(this: Arc<Mutex<Self>>, peer_id: PeerId, negotiation_role: NegotiationRole) {
+    async fn negotiate(this: Arc<Mutex<Self>>) {
+        let peer_id = PeerId(1);
         println!("PeerCreated event: {}", peer_id);
         let mut lock = this.lock().unwrap();
-        let pc = lock.api.new_peer_connection(RTCConfiguration {
-            bundle_policy: RTCBundlePolicy::MaxBundle,
-            ..RTCConfiguration::default()
-        }).await.unwrap();
+        let pc = lock
+            .api
+            .new_peer_connection(RTCConfiguration {
+                bundle_policy: RTCBundlePolicy::MaxBundle,
+                ..RTCConfiguration::default()
+            })
+            .await
+            .unwrap();
+
+        pc.on_track(Box::new({
+            println!("on track subscriber");
+            let this = Arc::clone(&this);
+            let dtest = DescructorTester;
+            move |track, _, _| {
+                dtest.clone();
+                println!("Receiver track received");
+                Box::pin({
+                    let this = Arc::clone(&this);
+                    async move {
+                        println!("Receiver track received");
+                        let mut lock = this.lock().unwrap();
+                        lock.receiver_tracks.push(track);
+                    }
+                })
+            }
+        }));
+
+        let t = pc
+            .add_transceiver_from_kind(
+                RTPCodecType::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    send_encodings: Vec::new(),
+                }),
+            )
+            .await.unwrap();
+        let t = pc
+            .add_transceiver_from_kind(
+                RTPCodecType::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    send_encodings: Vec::new(),
+                }),
+            )
+            .await.unwrap();
+
+        let offer = pc.create_offer(None).await.unwrap();
+
+        let ts = pc.get_transceivers().await;
+        for t in &ts {
+            println!("Direction: {:?}", t.direction());
+        }
+
+        let audio_ts = ts
+            .iter()
+            .filter(|a| a.direction() == RTCRtpTransceiverDirection::Sendonly)
+            .next()
+            .unwrap();
+
+        if audio_ts.direction() == RTCRtpTransceiverDirection::Sendonly {
+            println!("Found SendOnly transceiver");
+            let track_v = Arc::new({
+                TrackLocalStaticSample::new(
+                    RTCRtpCodecCapability {
+                        mime_type: "audio/OPUS".to_owned(),
+                        ..Default::default()
+                    },
+                    format!("audio{}", peer_id),
+                    "webrtc-rs".to_owned(),
+                )
+            });
+
+            let tr = ts
+                .iter()
+                .filter(|t| t.direction() == RTCRtpTransceiverDirection::Sendonly)
+                .find(|a| a.kind() == RTPCodecType::Audio)
+                .map(Clone::clone)
+                .unwrap();
+            let _ = tr
+                .sender()
+                .await
+                .replace_track(Some(
+                    Arc::clone(&track_v) as Arc<dyn TrackLocal + Send + Sync>
+                ))
+                .await;
+            lock.sender_tracks.push(track_v);
+        }
+
+        pc.on_ice_candidate({
+            Box::new(move |ice| {
+                println!("On ICE Candidate: {:?}", ice);
+                Box::pin(async move {
+                    if let Some(ice) = ice {
+                        let mut req_client = reqwest::Client::new();
+                        let resp = req_client
+                            .patch("http://127.0.0.1:3000")
+                            .body(format!("{}:{}", ice.address, ice.port))
+                            .send()
+                            .await
+                            .unwrap();
+                        println!("ICE candidate sent");
+                    }
+                })
+            })
+        });
+
+        pc.set_local_description(offer.clone()).await.unwrap();
+
+        let mut req_client = reqwest::Client::new();
+        let resp: Answer = req_client
+            .post("http://127.0.0.1:3000")
+            .json(&Offer::from_sdp_string(&offer.sdp).unwrap())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        // panic!("{:?}", resp.to_sdp_string());
+
+        pc.set_remote_description(RTCSessionDescription::answer(resp.to_sdp_string()).unwrap())
+            .await
+            .unwrap();
+        let audio_receive: Vec<_> = ts
+            .iter()
+            .filter(|t| t.direction() == RTCRtpTransceiverDirection::Recvonly)
+            .cloned()
+            .collect();
+
+        for ts in audio_receive {
+            if let Some(track) = ts.receiver().await.track().await {
+                println!("Pushed receiver track count: {:?}", ts);
+                lock.receiver_tracks.push(track);
+            }
+            lock.receivers.push(ts.receiver().await);
+        }
+
+        lock.pcs.insert(peer_id, pc);
+
+        if let Some(tx) = lock.negotiation_completed_tx.take() {
+            tx.send(());
+        }
+    }
+
+    async fn handle_peer_created(
+        this: Arc<Mutex<Self>>,
+        peer_id: PeerId,
+        negotiation_role: NegotiationRole,
+    ) {
+        println!("PeerCreated event: {}", peer_id);
+        let mut lock = this.lock().unwrap();
+        let pc = lock
+            .api
+            .new_peer_connection(RTCConfiguration {
+                bundle_policy: RTCBundlePolicy::MaxBundle,
+                ..RTCConfiguration::default()
+            })
+            .await
+            .unwrap();
 
         pc.on_track(Box::new({
             println!("on track subscriber");
@@ -199,14 +376,10 @@ impl SfuMember {
                                 };
                                 let msg = ClientMsg::Command {
                                     room_id,
-                                    command: Command::SetIceCandidate {
-                                        peer_id,
-                                        candidate,
-                                    },
+                                    command: Command::SetIceCandidate { peer_id, candidate },
                                 };
-                                let msg = ws::Message::Text(
-                                    serde_json::to_string(&msg).unwrap().into(),
-                                );
+                                let msg =
+                                    ws::Message::Text(serde_json::to_string(&msg).unwrap().into());
                                 this.lock().unwrap().ws_sink.send(msg);
                             }
                             _ => (),
@@ -223,16 +396,21 @@ impl SfuMember {
             NegotiationRole::Answerer(sdp_offer) => {
                 let answ = {
                     pc.set_remote_description(
-                        RTCSessionDescription::offer(sdp_offer.clone())
-                            .unwrap()
-                    ).await.unwrap();
+                        RTCSessionDescription::offer(sdp_offer.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
 
                     let ts = pc.get_transceivers().await;
                     for t in &ts {
                         println!("Direction: {:?}", t.direction());
                     }
 
-                    let audio_receive: Vec<_> = ts.iter().filter(|t| t.direction() == RTCRtpTransceiverDirection::Recvonly).cloned().collect();
+                    let audio_receive: Vec<_> = ts
+                        .iter()
+                        .filter(|t| t.direction() == RTCRtpTransceiverDirection::Recvonly)
+                        .cloned()
+                        .collect();
 
                     let audio_ts = ts
                         .iter()
@@ -240,9 +418,7 @@ impl SfuMember {
                         .next()
                         .unwrap();
 
-                    if audio_ts.direction()
-                        == RTCRtpTransceiverDirection::Sendonly
-                    {
+                    if audio_ts.direction() == RTCRtpTransceiverDirection::Sendonly {
                         println!("Found SendOnly transceiver");
                         let track_v = Arc::new({
                             TrackLocalStaticSample::new(
@@ -264,25 +440,25 @@ impl SfuMember {
                         let _ = tr
                             .sender()
                             .await
-                            .replace_track(Some(Arc::clone(&track_v)
-                                as Arc<dyn TrackLocal + Send + Sync>))
+                            .replace_track(Some(
+                                Arc::clone(&track_v) as Arc<dyn TrackLocal + Send + Sync>
+                            ))
                             .await;
                         lock.sender_tracks.push(track_v);
                     }
-                        let answer = pc.create_answer(None).await.unwrap();
-                        pc.set_local_description(
-                            RTCSessionDescription::answer(answer.sdp.clone())
-                                .unwrap(),
-                        )
-                            .await
-                            .unwrap();
+                    let answer = pc.create_answer(None).await.unwrap();
+                    pc.set_local_description(
+                        RTCSessionDescription::answer(answer.sdp.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                     let msg = ClientMsg::Command {
                         room_id: lock.room_id.clone(),
                         command: Command::MakeSdpAnswer {
                             peer_id,
                             sdp_answer: answer.sdp.clone(),
                             transceivers_statuses: HashMap::new(),
-                        }
+                        },
                     };
 
                     lock.ws_sink.send(ws::Message::Text(
@@ -296,16 +472,15 @@ impl SfuMember {
                         //     println!("fuck no tracks");
                         // }
                     }
-                        answer
+                    answer
                 };
-
 
                 lock.pcs.insert(peer_id, pc);
 
                 // if lock.pcs.len() > 1 {
-                    if let Some(tx) = lock.negotiation_completed_tx.take() {
-                        tx.send(());
-                    }
+                if let Some(tx) = lock.negotiation_completed_tx.take() {
+                    tx.send(());
+                }
                 // }
             }
         }
@@ -321,33 +496,34 @@ impl SfuMember {
                     ServerMsg::Ping(id) => {
                         let mut lock = this.lock().unwrap();
                         let json = serde_json::to_string(&ClientMsg::Pong(id)).unwrap();
-                        lock.ws_sink
-                            .send(ws::Message::Text(json.into()))
-                            .unwrap();
+                        lock.ws_sink.send(ws::Message::Text(json.into())).unwrap();
                     }
-                    ServerMsg::Event { event, .. } => {
-                        match event {
-                            Event::PeerCreated { peer_id, negotiation_role, .. } => {
-                                Self::handle_peer_created(Arc::clone(&this), peer_id, negotiation_role).await;
-                            }
-                            Event::PeerUpdated { peer_id, .. } => {
-
-                            }
-                            Event::IceCandidateDiscovered { peer_id, candidate, .. } => {
-                                let mut lock = this.lock().unwrap();
-                                let pc = lock.pcs.get_mut(&peer_id).unwrap();
-                                pc.add_ice_candidate(RTCIceCandidateInit {
-                                    candidate: candidate.candidate.clone(),
-                                    sdp_mid: candidate.sdp_mid.clone(),
-                                    sdp_mline_index: candidate.sdp_m_line_index,
-                                    username_fragment: None,
-                                })
-                                    .await
-                                    .unwrap();
-                            }
-                            _ => ()
+                    ServerMsg::Event { event, .. } => match event {
+                        Event::PeerCreated {
+                            peer_id,
+                            negotiation_role,
+                            ..
+                        } => {
+                            Self::handle_peer_created(Arc::clone(&this), peer_id, negotiation_role)
+                                .await;
                         }
-                    }
+                        Event::PeerUpdated { peer_id, .. } => {}
+                        Event::IceCandidateDiscovered {
+                            peer_id, candidate, ..
+                        } => {
+                            let mut lock = this.lock().unwrap();
+                            let pc = lock.pcs.get_mut(&peer_id).unwrap();
+                            pc.add_ice_candidate(RTCIceCandidateInit {
+                                candidate: candidate.candidate.clone(),
+                                sdp_mid: candidate.sdp_mid.clone(),
+                                sdp_mline_index: candidate.sdp_m_line_index,
+                                username_fragment: None,
+                            })
+                            .await
+                            .unwrap();
+                        }
+                        _ => (),
+                    },
                     _ => (),
                 }
             }
@@ -361,16 +537,12 @@ impl SfuMember {
         };
         let data = Bytes::from_iter((0..1000).map(|i| (i % 255) as u8).into_iter());
         println!("len: {}", data.len());
-        let e = [
-            HeaderExtension::Custom {
-                uri: Cow::from("urn:ietf:params:rtp-hdrext:sdes:mid"),
-                extension: Box::new(
-                    MarshalBytes {
-                        buf: Bytes::copy_from_slice("0".as_bytes())
-                    }
-                )
-            }
-        ];
+        let e = [HeaderExtension::Custom {
+            uri: Cow::from("urn:ietf:params:rtp-hdrext:sdes:mid"),
+            extension: Box::new(MarshalBytes {
+                buf: Bytes::copy_from_slice("0".as_bytes()),
+            }),
+        }];
 
         let mut pkt_cnt = 0;
         let mut last_period_end_at = Instant::now();
@@ -386,11 +558,17 @@ impl SfuMember {
                 continue;
             }
             pkt_cnt += 1;
-            track.write_sample_with_extensions(&Sample {
-                data: data.clone(),
-                duration: Duration::from_secs(1),
-                ..Default::default()
-            }, &e).await.unwrap();
+            track
+                .write_sample_with_extensions(
+                    &Sample {
+                        data: data.clone(),
+                        duration: Duration::from_millis(100),
+                        ..Default::default()
+                    },
+                    &e,
+                )
+                .await
+                .unwrap();
         }
     }
 
@@ -401,16 +579,12 @@ impl SfuMember {
         };
         let data = Bytes::from_iter((0..1000).map(|i| (i % 255) as u8).into_iter());
         println!("len: {}", data.len());
-        let e = [
-            HeaderExtension::Custom {
-                uri: Cow::from("urn:ietf:params:rtp-hdrext:sdes:mid"),
-                extension: Box::new(
-                    MarshalBytes {
-                        buf: Bytes::copy_from_slice("0".as_bytes())
-                    }
-                )
-            }
-        ];
+        let e = [HeaderExtension::Custom {
+            uri: Cow::from("urn:ietf:params:rtp-hdrext:sdes:mid"),
+            extension: Box::new(MarshalBytes {
+                buf: Bytes::copy_from_slice("0".as_bytes()),
+            }),
+        }];
         actix::spawn(async move {
             let mut pkt_cnt = 0;
             let mut last_period_end_at = Instant::now();
@@ -426,11 +600,17 @@ impl SfuMember {
                     continue;
                 }
                 pkt_cnt += 1;
-                track.write_sample_with_extensions(&Sample {
-                    data: data.clone(),
-                    duration: Duration::from_secs(1),
-                    ..Default::default()
-                }, &e).await.unwrap();
+                track
+                    .write_sample_with_extensions(
+                        &Sample {
+                            data: data.clone(),
+                            duration: Duration::from_secs(1),
+                            ..Default::default()
+                        },
+                        &e,
+                    )
+                    .await
+                    .unwrap();
             }
         });
         // let data = Bytes::from_iter((0..1000).map(|i| (i % 255) as u8).into_iter());
@@ -459,6 +639,7 @@ impl SfuMember {
         loop {
             // tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             if remote_track.is_none() {
+                // println!("Fuck it");
                 tokio::task::yield_now().await;
                 let remote_tracks = this.lock().unwrap().receiver_tracks.clone();
                 if !remote_tracks.is_empty() {
