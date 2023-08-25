@@ -210,7 +210,7 @@ impl SfuMember {
             .add_transceiver_from_kind(
                 RTPCodecType::Audio,
                 Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    direction: RTCRtpTransceiverDirection::Sendonly,
                     send_encodings: Vec::new(),
                 }),
             )
@@ -219,7 +219,7 @@ impl SfuMember {
             .add_transceiver_from_kind(
                 RTPCodecType::Audio,
                 Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Sendonly,
+                    direction: RTCRtpTransceiverDirection::Recvonly,
                     send_encodings: Vec::new(),
                 }),
             )
